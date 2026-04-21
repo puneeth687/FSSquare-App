@@ -1,0 +1,13 @@
+node_modules/ 
+android/.gradle/ 
+android/app/build/ 
+android/build/ 
+.expo/ 
+npm-debug.log* 
+*.jks 
+*.p8 
+*.p12 
+*.key 
+*.mobileprovision 
+*.orig.* 
+web-report/ 

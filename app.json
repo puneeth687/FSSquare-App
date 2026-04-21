@@ -1,0 +1,29 @@
+{
+  "expo": {
+    "name": "FS²",
+    "slug": "FSSquared",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "fsquared",
+    "platforms": ["ios", "android"],
+    "android": {
+      "package": "com.fssquared.app",
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            {
+              "scheme": "fsquared",
+              "host": "oauthredirect"
+            }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        }
+      ]
+    },
+    "ios": {
+      "bundleIdentifier": "com.fssquared.app"
+    }
+  }
+}
