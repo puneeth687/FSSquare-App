@@ -8,6 +8,7 @@
     "platforms": ["ios", "android"],
     "android": {
       "package": "com.fssquared.app",
+       "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"],
       "intentFilters": [
         {
           "action": "VIEW",

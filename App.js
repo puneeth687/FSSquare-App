@@ -16,6 +16,7 @@ import {Modal} from "react-native";
 import {Ionicons} from "@expo/vector-icons";
 import {useState, useEffect} from "react";
 import * as WebBrowser from "expo-web-browser";
+import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {NavigationContainer} from "@react-navigation/native";
 import {createNativeStackNavigator} from "@react-navigation/native-stack";
@@ -24,7 +25,8 @@ WebBrowser.maybeCompleteAuthSession();
 
 const SF_CLIENT_ID = "YOUR_SALESFORCE_CONSUMER_KEY";
 const SF_CLIENT_SECRET = "YOUR_SALESFORCE_CONSUMER_SECRET";
-const SF_BASE_URL = "YOUR_SALESFORCE_INSTANCE_URL";
+const SF_BASE_URL = "YOUR_SALESFORCE_INSTANCE_URL"; // e.g., https://yourdomain.my.salesforce.com/
+// ============================================================================
 
 const Stack = createNativeStackNavigator();
 
@@ -260,10 +262,9 @@ function RoleSelector({onSelectRole}) {
     );
 }
 
-// ─── VISIT DETAILS SCREEN ────────────────────────────────────────────────────
 // ─── VISIT DETAILS SCREEN (Only Notes editable) ─────────────────────────────
 function VisitDetailsScreen({route, navigation}) {
-    const {visit, sfToken, sfInstanceUrl} = route.params;
+    const {visit, sfToken, sfInstanceUrl, onVisitUpdate} = route.params;
     const [showMore, setShowMore] = useState(false);
     const [modalVisible, setModalVisible] = useState(false);
     const [editingValue, setEditingValue] = useState("");
@@ -281,18 +282,165 @@ function VisitDetailsScreen({route, navigation}) {
         });
     };
 
-    const handleCheckIn = () => {
-        Alert.alert("Check In", `Check in to ${visit.customer}?`, [
+    const handleCheckIn = async () => {
+        try {
+            // Request location permissions
+            const {status} = await Location.requestForegroundPermissionsAsync();
+            if (status !== "granted") {
+                Alert.alert("Permission Denied", "Location permission is required to check in");
+                return;
+            }
+
+            // Get current location
+            const location = await Location.getCurrentPositionAsync({
+                accuracy: Location.Accuracy.High,
+            });
+
+            const {latitude, longitude} = location.coords;
+
+            setUpdating(true);
+
+            // Get current user ID
+            const userId = await getCurrentUserId();
+
+            if (!userId) {
+                throw new Error("Could not get current user ID");
+            }
+
+            // Create Attendance record only (don't update Visit status)
+            const attendanceBody = {
+                Employee_Name__c: userId,
+                Login_Time__c: new Date().toISOString(),
+                Latitude__c: latitude.toString(),
+                Longitude__c: longitude.toString(),
+                Status__c: "Present",
+            };
+
+            console.log("Creating Attendance record with:", attendanceBody);
+
+            const attendanceResponse = await fetch(`${sfInstanceUrl}/services/data/v58.0/sobjects/Attendence__c`, {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${sfToken}`,
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(attendanceBody),
+            });
+
+            const attendanceResult = await attendanceResponse.json();
+
+            if (!attendanceResponse.ok) {
+                console.error("Attendance API Error:", attendanceResult);
+                throw new Error(attendanceResult[0]?.message || "Failed to create attendance record");
+            }
+
+            console.log("Attendance created:", attendanceResult);
+
+            // Show success message - no Visit status update
+            Alert.alert("Success", "Checked in successfully! Attendance record created.");
+        } catch (error) {
+            console.error("Check In error:", error);
+            Alert.alert("Error", `Failed to check in: ${error.message}`);
+        } finally {
+            setUpdating(false);
+        }
+    };
+
+    const handleComplete = async () => {
+        Alert.alert("Complete Visit", `Mark ${visit.customer} as completed?`, [
             {text: "Cancel", style: "cancel"},
-            {text: "Check In", onPress: () => Alert.alert("Success", "Checked in successfully!")},
+            {
+                text: "Complete",
+                onPress: async () => {
+                    setUpdating(true);
+                    try {
+                        // Update Visit status to "Completed"
+                        const response = await fetch(
+                            `${sfInstanceUrl}/services/data/v58.0/sobjects/Visit/${visit.id}`,
+                            {
+                                method: "PATCH",
+                                headers: {
+                                    Authorization: `Bearer ${sfToken}`,
+                                    "Content-Type": "application/json",
+                                },
+                                body: JSON.stringify({Status: "Completed"}),
+                            }
+                        );
+
+                        if (!response.ok) {
+                            const errorData = await response.json();
+                            throw new Error(errorData[0]?.message || "Failed to complete visit");
+                        }
+
+                        // Update local visit object
+                        visit.status = "Completed";
+                        visit.statusColor = getStatusColor("Completed");
+                        visit.statusBg = getStatusBg("Completed");
+
+                        // Update parent component
+                        if (onVisitUpdate) {
+                            onVisitUpdate(visit);
+                        }
+
+                        Alert.alert("🎉 Visit Completed!", `Great job! ${visit.customer} visit has been completed.`, [
+                            {text: "OK", onPress: () => navigation.goBack()},
+                        ]);
+                    } catch (error) {
+                        console.error("Complete error:", error);
+                        Alert.alert("Error", `Failed to complete visit: ${error.message}`);
+                    } finally {
+                        setUpdating(false);
+                    }
+                },
+            },
         ]);
     };
 
-    const handleComplete = () => {
-        Alert.alert("Complete Visit", `Mark ${visit.customer} as completed?`, [
-            {text: "Cancel", style: "cancel"},
-            {text: "Complete", onPress: () => Alert.alert("Success", "Visit marked as completed!")},
-        ]);
+    const getCurrentUserId = async () => {
+        try {
+            const response = await fetch(`${sfInstanceUrl}/services/oauth2/userinfo`, {
+                headers: {Authorization: `Bearer ${sfToken}`},
+            });
+            const userData = await response.json();
+            return userData.user_id || userData.sub?.split("/").pop();
+        } catch (error) {
+            console.error("Error getting user ID:", error);
+            return null;
+        }
+    };
+
+    const getStatusColor = (status) => {
+        switch (status?.toLowerCase()) {
+            case "completed":
+                return C.success;
+            case "checked in":
+                return C.teal;
+            case "in progress":
+                return C.warning;
+            case "planned":
+                return C.primary;
+            case "cancelled":
+                return C.danger;
+            default:
+                return C.primary;
+        }
+    };
+
+    const getStatusBg = (status) => {
+        switch (status?.toLowerCase()) {
+            case "completed":
+                return C.successLight;
+            case "checked in":
+                return C.tealLight;
+            case "in progress":
+                return C.warningLight;
+            case "planned":
+                return C.primaryLight;
+            case "cancelled":
+                return C.dangerLight;
+            default:
+                return C.primaryLight;
+        }
     };
 
     const handleNavigate = () => {
@@ -311,7 +459,6 @@ function VisitDetailsScreen({route, navigation}) {
         setUpdating(true);
 
         try {
-            // Update Notes in Salesforce
             const response = await fetch(`${sfInstanceUrl}/services/data/v58.0/sobjects/Visit/${visit.id}`, {
                 method: "PATCH",
                 headers: {
@@ -322,13 +469,12 @@ function VisitDetailsScreen({route, navigation}) {
             });
 
             if (response.ok) {
-                // Update local visit object
                 visit.note = editingValue;
-
+                if (onVisitUpdate) {
+                    onVisitUpdate(visit);
+                }
                 Alert.alert("Success", "Notes updated successfully!");
                 setModalVisible(false);
-
-                // Refresh the screen
                 navigation.setParams({visit: {...visit}});
             } else {
                 const errorData = await response.json();
@@ -347,6 +493,10 @@ function VisitDetailsScreen({route, navigation}) {
         return value;
     };
 
+    // Get dynamic status color for display
+    const currentStatusColor = getStatusColor(visit.status);
+    const currentStatusBg = getStatusBg(visit.status);
+
     return (
         <SafeAreaView style={[styles.container, {paddingTop: 0}]}>
             <StatusBar style="dark" />
@@ -360,18 +510,18 @@ function VisitDetailsScreen({route, navigation}) {
             </View>
 
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{paddingBottom: 30}}>
-                {/* Status Card */}
-                <View style={[styles.detailsStatusCard, {backgroundColor: visit.statusBg || C.tealLight}]}>
+                {/* Status Card - Dynamic based on current status */}
+                <View style={[styles.detailsStatusCard, {backgroundColor: currentStatusBg}]}>
                     <View style={styles.detailsStatusRow}>
-                        <Ionicons name="time-outline" size={20} color={visit.statusColor || C.teal} />
-                        <Text style={[styles.detailsStatusText, {color: visit.statusColor || C.teal}]}>
+                        <Ionicons name="time-outline" size={20} color={currentStatusColor} />
+                        <Text style={[styles.detailsStatusText, {color: currentStatusColor}]}>
                             {displayValue(visit.status, "Planned")}
                         </Text>
                     </View>
                     <Text style={styles.detailsVisitType}>{displayValue(visit.type, "Field Visit")}</Text>
                 </View>
 
-                {/* SECTION 1: Customer Information (Read Only - No Pencil) */}
+                {/* Customer Information */}
                 <View style={styles.detailsCard}>
                     <View style={styles.detailsCardHeader}>
                         <Ionicons name="business-outline" size={20} color={C.primary} />
@@ -391,7 +541,7 @@ function VisitDetailsScreen({route, navigation}) {
                     </TouchableOpacity>
                 </View>
 
-                {/* SECTION 2: Schedule (Read Only - No Pencil) */}
+                {/* Schedule */}
                 <View style={styles.detailsCard}>
                     <View style={styles.detailsCardHeader}>
                         <Ionicons name="calendar-outline" size={20} color={C.primary} />
@@ -419,7 +569,7 @@ function VisitDetailsScreen({route, navigation}) {
                     </View>
                 </View>
 
-                {/* SECTION 3: Notes (Editable - WITH Pencil Icon) */}
+                {/* Notes (Editable) */}
                 <View style={styles.detailsCard}>
                     <View style={styles.detailsCardHeader}>
                         <Ionicons name="chatbubble-outline" size={20} color={C.primary} />
@@ -431,21 +581,27 @@ function VisitDetailsScreen({route, navigation}) {
                     <Text style={styles.detailsNotesText}>{displayValue(visit.note, "No notes available")}</Text>
                 </View>
 
-                {/* SECTION 4: Actions */}
+                {/* Action Buttons - Check In & Complete */}
                 <View style={styles.detailsActionsContainer}>
                     <TouchableOpacity
                         style={[styles.detailsActionBtn, {backgroundColor: C.teal}]}
                         onPress={handleCheckIn}
+                        disabled={updating || visit.status === "Checked In" || visit.status === "Completed"}
                     >
                         <Ionicons name="checkbox-outline" size={22} color="#fff" />
-                        <Text style={styles.detailsActionBtnText}>Check In</Text>
+                        <Text style={styles.detailsActionBtnText}>
+                            {visit.status === "Checked In" ? "Checked In ✓" : "Check In"}
+                        </Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                         style={[styles.detailsActionBtn, {backgroundColor: C.success}]}
                         onPress={handleComplete}
+                        disabled={updating || visit.status === "Completed"}
                     >
                         <Ionicons name="checkmark-circle-outline" size={22} color="#fff" />
-                        <Text style={styles.detailsActionBtnText}>Complete</Text>
+                        <Text style={styles.detailsActionBtnText}>
+                            {visit.status === "Completed" ? "Completed ✓" : "Complete Visit"}
+                        </Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                         style={[styles.detailsActionBtn, {backgroundColor: C.primary}]}
@@ -456,7 +612,7 @@ function VisitDetailsScreen({route, navigation}) {
                     </TouchableOpacity>
                 </View>
 
-                {/* SECTION 5: View More - Expandable Section (Read Only) */}
+                {/* View More Section */}
                 <TouchableOpacity
                     style={styles.viewMoreButton}
                     onPress={() => setShowMore(!showMore)}
@@ -472,7 +628,7 @@ function VisitDetailsScreen({route, navigation}) {
 
                 {showMore && (
                     <>
-                        {/* Additional Visit Details (Read Only) */}
+                        {/* Additional Visit Details */}
                         <View style={styles.detailsCard}>
                             <View style={styles.detailsCardHeader}>
                                 <Ionicons name="document-text-outline" size={20} color={C.primary} />
@@ -491,30 +647,14 @@ function VisitDetailsScreen({route, navigation}) {
                                 <Text style={styles.detailsInfoValue}>{displayValue(visit.tour)}</Text>
                             </View>
                             <View style={styles.detailsInfoRow}>
-                                <Text style={styles.detailsInfoLabel}>Creation Mode:</Text>
-                                <Text style={styles.detailsInfoValue}>{displayValue(visit.creationMode)}</Text>
-                            </View>
-                            <View style={styles.detailsInfoRow}>
-                                <Text style={styles.detailsInfoLabel}>Creation Date:</Text>
-                                <Text style={styles.detailsInfoValue}>{displayValue(visit.creationDateTime)}</Text>
-                            </View>
-                            <View style={styles.detailsInfoRow}>
                                 <Text style={styles.detailsInfoLabel}>Duration:</Text>
                                 <Text style={styles.detailsInfoValue}>
                                     {displayValue(visit.durationEffective)} minutes
                                 </Text>
                             </View>
-                            <View style={styles.detailsInfoRow}>
-                                <Text style={styles.detailsInfoLabel}>Week:</Text>
-                                <Text style={styles.detailsInfoValue}>{displayValue(visit.week)}</Text>
-                            </View>
-                            <View style={styles.detailsInfoRow}>
-                                <Text style={styles.detailsInfoLabel}>All-Day Event:</Text>
-                                <Text style={styles.detailsInfoValue}>{visit.isAllDayEvent ? "Yes" : "No"}</Text>
-                            </View>
                         </View>
 
-                        {/* Customer KPIs (Read Only) */}
+                        {/* Customer KPIs */}
                         <View style={styles.detailsCard}>
                             <View style={styles.detailsCardHeader}>
                                 <Ionicons name="stats-chart-outline" size={20} color={C.primary} />
@@ -527,18 +667,8 @@ function VisitDetailsScreen({route, navigation}) {
                                 </Text>
                             </View>
                             <View style={styles.detailsInfoRow}>
-                                <Text style={styles.detailsInfoLabel}>Distribution Rate Focus:</Text>
-                                <Text style={styles.detailsInfoValue}>
-                                    {displayValue(visit.distributionRateFocus, "0")}%
-                                </Text>
-                            </View>
-                            <View style={styles.detailsInfoRow}>
                                 <Text style={styles.detailsInfoLabel}>OoS Rate All:</Text>
                                 <Text style={styles.detailsInfoValue}>{displayValue(visit.oosRateAll, "0")}%</Text>
-                            </View>
-                            <View style={styles.detailsInfoRow}>
-                                <Text style={styles.detailsInfoLabel}>OoS Rate Focus:</Text>
-                                <Text style={styles.detailsInfoValue}>{displayValue(visit.oosRateFocus, "0")}%</Text>
                             </View>
                             <View style={styles.detailsInfoRow}>
                                 <Text style={styles.detailsInfoLabel}>Distribution Issue:</Text>
@@ -555,28 +685,6 @@ function VisitDetailsScreen({route, navigation}) {
                                 </Text>
                             </View>
                         </View>
-
-                        {/* Actual Times (Read Only) */}
-                        {(visit.actualStartTime || visit.actualEndTime) && (
-                            <View style={styles.detailsCard}>
-                                <View style={styles.detailsCardHeader}>
-                                    <Ionicons name="time-outline" size={20} color={C.primary} />
-                                    <Text style={styles.detailsCardTitle}>Actual Times</Text>
-                                </View>
-                                {visit.actualStartTime && (
-                                    <View style={styles.detailsInfoRow}>
-                                        <Text style={styles.detailsInfoLabel}>Actual Start:</Text>
-                                        <Text style={styles.detailsInfoValue}>{formatDate(visit.actualStartTime)}</Text>
-                                    </View>
-                                )}
-                                {visit.actualEndTime && (
-                                    <View style={styles.detailsInfoRow}>
-                                        <Text style={styles.detailsInfoLabel}>Actual End:</Text>
-                                        <Text style={styles.detailsInfoValue}>{formatDate(visit.actualEndTime)}</Text>
-                                    </View>
-                                )}
-                            </View>
-                        )}
                     </>
                 )}
 
