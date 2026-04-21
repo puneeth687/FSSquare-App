@@ -12,3 +12,5 @@ npm-debug.log*
 *.orig.* 
 web-report/ 
 .env 
+.env 
+App.js.secrets 
