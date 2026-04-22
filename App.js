@@ -1,4 +1,13 @@
 import {StatusBar} from "expo-status-bar";
+import CustomPopup from "./CustomPopup";
+import LogVisitScreen from "./LogVisitScreen";
+import NewLeadScreen from "./NewLeadScreen";
+import LeadsListScreen from "./LeadsListScreen";
+import LeadDetailsScreen from "./LeadDetailsScreen";
+import AccountsListScreen from "./AccountsListScreen";
+import AccountDetailsScreen from "./AccountDetailsScreen";
+import {useFocusEffect} from "@react-navigation/native";
+
 import {
     StyleSheet,
     Text,
@@ -11,8 +20,8 @@ import {
     TextInput,
     Alert,
     Linking,
+    Modal,
 } from "react-native";
-import {Modal} from "react-native";
 import {Ionicons} from "@expo/vector-icons";
 import {useState, useEffect} from "react";
 import * as WebBrowser from "expo-web-browser";
@@ -20,13 +29,29 @@ import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {NavigationContainer} from "@react-navigation/native";
 import {createNativeStackNavigator} from "@react-navigation/native-stack";
+// import { SafeAreaProvider } from 'react-native-safe-area-context';
+// import { Toaster } from 'expo-sonner';
+import VisitsListScreen from "./VisitsListScreen";
 
 WebBrowser.maybeCompleteAuthSession();
+// Disable font scaling globally
+if (Text.defaultProps) {
+    Text.defaultProps.allowFontScaling = false;
+} else {
+    Text.defaultProps = {};
+    Text.defaultProps.allowFontScaling = false;
+}
+
+if (TextInput.defaultProps) {
+    TextInput.defaultProps.allowFontScaling = false;
+} else {
+    TextInput.defaultProps = {};
+    TextInput.defaultProps.allowFontScaling = false;
+}
 
 const SF_CLIENT_ID = "YOUR_SALESFORCE_CONSUMER_KEY";
 const SF_CLIENT_SECRET = "YOUR_SALESFORCE_CONSUMER_SECRET";
-const SF_BASE_URL = "YOUR_SALESFORCE_INSTANCE_URL"; // e.g., https://yourdomain.my.salesforce.com/
-// ============================================================================
+const SF_BASE_URL = "YOUR_SALESFORCE_INSTANCE_URL"; 
 
 const Stack = createNativeStackNavigator();
 
@@ -95,10 +120,10 @@ const ROLES = {
             message: "Infosys Limited — 2 open service tickets before your 2pm visit. Be prepared.",
         },
         actions: [
-            {icon: "create-outline", label: "Log Visit"},
-            {icon: "person-add-outline", label: "New Lead"},
-            {icon: "trending-up-outline", label: "New Deal"},
-            {icon: "flag-outline", label: "Flag Opp"},
+            // {icon: "create-outline", label: "Log Visit"},
+            {icon: "person-add-outline", label: "My Leads"},
+            {icon: "trending-up-outline", label: "My Deals"},
+            // {icon: "flag-outline", label: "Flag Opp"},
         ],
     },
     manager: {
@@ -269,6 +294,12 @@ function VisitDetailsScreen({route, navigation}) {
     const [modalVisible, setModalVisible] = useState(false);
     const [editingValue, setEditingValue] = useState("");
     const [updating, setUpdating] = useState(false);
+    const [isCheckedIn, setIsCheckedIn] = useState(visit.checkedIn || false);
+    const [loading, setLoading] = useState(false);
+    const [popupVisible, setPopupVisible] = useState(false);
+    const [popupTitle, setPopupTitle] = useState("");
+    const [popupMessage, setPopupMessage] = useState("");
+    const [popupType, setPopupType] = useState("success");
 
     const formatDate = (dateString) => {
         if (!dateString) return "Not set";
@@ -283,117 +314,227 @@ function VisitDetailsScreen({route, navigation}) {
     };
 
     const handleCheckIn = async () => {
+        if (loading) return;
+
+        setPopupVisible(true);
+        setPopupTitle("Checking In...");
+        setPopupMessage("Getting your location");
+        setPopupType("loading");
+        setLoading(true);
+
         try {
-            // Request location permissions
-            const {status} = await Location.requestForegroundPermissionsAsync();
-            if (status !== "granted") {
-                Alert.alert("Permission Denied", "Location permission is required to check in");
+            if (!isCheckedIn) {
+                // Request location permission
+                const {status} = await Location.requestForegroundPermissionsAsync();
+                if (status !== "granted") {
+                    setPopupTitle("Permission Denied");
+                    setPopupMessage("Location permission is required to check in");
+                    setPopupType("error");
+                    setLoading(false);
+                    return;
+                }
+
+                setPopupMessage("Fetching GPS coordinates...");
+                const location = await Location.getCurrentPositionAsync({
+                    accuracy: Location.Accuracy.High,
+                });
+
+                const {latitude, longitude} = location.coords;
+                const userId = await getCurrentUserId();
+
+                if (!userId) {
+                    throw new Error("Could not get current user ID");
+                }
+
+                setPopupMessage("Creating attendance record...");
+
+                // Create Attendance record
+                const attendanceBody = {
+                    Employee_Name__c: userId,
+                    Login_Time__c: new Date().toISOString(),
+                    Latitude__c: latitude.toString(),
+                    Longitude__c: longitude.toString(),
+                    Status__c: "Present",
+                };
+
+                const attendanceResponse = await fetch(`${sfInstanceUrl}/services/data/v58.0/sobjects/Attendence__c`, {
+                    method: "POST",
+                    headers: {
+                        Authorization: `Bearer ${sfToken}`,
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify(attendanceBody),
+                });
+
+                if (!attendanceResponse.ok) {
+                    const errorData = await attendanceResponse.json();
+                    throw new Error(errorData[0]?.message || "Failed to create attendance record");
+                }
+
+                setPopupMessage("Updating actual start time...");
+
+                // Update Actual Start Time on Visit
+                const currentTime = new Date().toISOString();
+                const updateResponse = await fetch(`${sfInstanceUrl}/services/data/v58.0/sobjects/Visit/${visit.id}`, {
+                    method: "PATCH",
+                    headers: {
+                        Authorization: `Bearer ${sfToken}`,
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                        ActualStartTime__c: currentTime,
+                    }),
+                });
+
+                if (!updateResponse.ok) {
+                    const errorData = await updateResponse.json();
+                    console.log("Warning: Could not update actual start time", errorData);
+                    // Don't throw - attendance was created successfully
+                }
+
+                setIsCheckedIn(true);
+                visit.actualStartTime = currentTime;
+
+                // Update parent component
+                if (onVisitUpdate) {
+                    onVisitUpdate(visit);
+                }
+
+                setPopupTitle("✓ Checked In!");
+                setPopupMessage(`Checked in at ${new Date().toLocaleTimeString()}\nActual start time recorded.`);
+                setPopupType("success");
+            } else {
+                setPopupVisible(false);
+                setLoading(false);
+
+                // CHECK OUT - show confirmation first
+                Alert.alert("Check Out", `Ready to check out from ${visit.customer}?`, [
+                    {text: "Not Yet", style: "cancel"},
+                    {
+                        text: "Yes, Check Out",
+                        onPress: async () => {
+                            setPopupVisible(true);
+                            setPopupTitle("Checking Out...");
+                            setPopupMessage("Updating actual end time");
+                            setPopupType("loading");
+                            setLoading(true);
+
+                            try {
+                                const currentTime = new Date().toISOString();
+                                const updateResponse = await fetch(
+                                    `${sfInstanceUrl}/services/data/v58.0/sobjects/Visit/${visit.id}`,
+                                    {
+                                        method: "PATCH",
+                                        headers: {
+                                            Authorization: `Bearer ${sfToken}`,
+                                            "Content-Type": "application/json",
+                                        },
+                                        body: JSON.stringify({
+                                            Actual_End_Time__c: currentTime,
+                                        }),
+                                    }
+                                );
+
+                                if (!updateResponse.ok) {
+                                    const errorData = await updateResponse.json();
+                                    throw new Error(errorData[0]?.message || "Failed to update end time");
+                                }
+
+                                setIsCheckedIn(false);
+                                visit.actualEndTime = currentTime;
+
+                                // Update parent component
+                                if (onVisitUpdate) {
+                                    onVisitUpdate(visit);
+                                }
+
+                                setPopupTitle("👋 Checked Out!");
+                                setPopupMessage(
+                                    `Checked out at ${new Date().toLocaleTimeString()}\nActual end time recorded. Have a great day!`
+                                );
+                                setPopupType("success");
+                            } catch (error) {
+                                setPopupTitle("Check Out Failed");
+                                setPopupMessage(error.message);
+                                setPopupType("error");
+                            } finally {
+                                setLoading(false);
+                            }
+                        },
+                    },
+                ]);
                 return;
             }
-
-            // Get current location
-            const location = await Location.getCurrentPositionAsync({
-                accuracy: Location.Accuracy.High,
-            });
-
-            const {latitude, longitude} = location.coords;
-
-            setUpdating(true);
-
-            // Get current user ID
-            const userId = await getCurrentUserId();
-
-            if (!userId) {
-                throw new Error("Could not get current user ID");
-            }
-
-            // Create Attendance record only (don't update Visit status)
-            const attendanceBody = {
-                Employee_Name__c: userId,
-                Login_Time__c: new Date().toISOString(),
-                Latitude__c: latitude.toString(),
-                Longitude__c: longitude.toString(),
-                Status__c: "Present",
-            };
-
-            console.log("Creating Attendance record with:", attendanceBody);
-
-            const attendanceResponse = await fetch(`${sfInstanceUrl}/services/data/v58.0/sobjects/Attendence__c`, {
-                method: "POST",
-                headers: {
-                    Authorization: `Bearer ${sfToken}`,
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify(attendanceBody),
-            });
-
-            const attendanceResult = await attendanceResponse.json();
-
-            if (!attendanceResponse.ok) {
-                console.error("Attendance API Error:", attendanceResult);
-                throw new Error(attendanceResult[0]?.message || "Failed to create attendance record");
-            }
-
-            console.log("Attendance created:", attendanceResult);
-
-            // Show success message - no Visit status update
-            Alert.alert("Success", "Checked in successfully! Attendance record created.");
         } catch (error) {
             console.error("Check In error:", error);
-            Alert.alert("Error", `Failed to check in: ${error.message}`);
+            setPopupTitle("Check In Failed");
+            setPopupMessage(error.message);
+            setPopupType("error");
         } finally {
-            setUpdating(false);
+            setLoading(false);
         }
     };
 
     const handleComplete = async () => {
-        Alert.alert("Complete Visit", `Mark ${visit.customer} as completed?`, [
-            {text: "Cancel", style: "cancel"},
-            {
-                text: "Complete",
-                onPress: async () => {
-                    setUpdating(true);
-                    try {
-                        // Update Visit status to "Completed"
-                        const response = await fetch(
-                            `${sfInstanceUrl}/services/data/v58.0/sobjects/Visit/${visit.id}`,
-                            {
-                                method: "PATCH",
-                                headers: {
-                                    Authorization: `Bearer ${sfToken}`,
-                                    "Content-Type": "application/json",
-                                },
-                                body: JSON.stringify({Status: "Completed"}),
-                            }
-                        );
+        setPopupVisible(true);
+        setPopupTitle("Completing Visit...");
+        setPopupMessage("Updating Salesforce");
+        setPopupType("loading");
+        setLoading(true);
 
-                        if (!response.ok) {
-                            const errorData = await response.json();
-                            throw new Error(errorData[0]?.message || "Failed to complete visit");
-                        }
-
-                        // Update local visit object
-                        visit.status = "Completed";
-                        visit.statusColor = getStatusColor("Completed");
-                        visit.statusBg = getStatusBg("Completed");
-
-                        // Update parent component
-                        if (onVisitUpdate) {
-                            onVisitUpdate(visit);
-                        }
-
-                        Alert.alert("🎉 Visit Completed!", `Great job! ${visit.customer} visit has been completed.`, [
-                            {text: "OK", onPress: () => navigation.goBack()},
-                        ]);
-                    } catch (error) {
-                        console.error("Complete error:", error);
-                        Alert.alert("Error", `Failed to complete visit: ${error.message}`);
-                    } finally {
-                        setUpdating(false);
-                    }
+        try {
+            const response = await fetch(`${sfInstanceUrl}/services/data/v58.0/sobjects/Visit/${visit.id}`, {
+                method: "PATCH",
+                headers: {
+                    Authorization: `Bearer ${sfToken}`,
+                    "Content-Type": "application/json",
                 },
-            },
-        ]);
+                body: JSON.stringify({Status: "Completed"}),
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData[0]?.message || "Failed to complete visit");
+            }
+
+            visit.status = "Completed";
+            if (onVisitUpdate) {
+                onVisitUpdate(visit);
+            }
+
+            setPopupTitle("🎉 Visit Completed!");
+            setPopupMessage(`${visit.customer} visit completed! Great job!`);
+            setPopupType("success");
+
+            setTimeout(() => {
+                setPopupVisible(false);
+                navigation.goBack();
+            }, 2000);
+        } catch (error) {
+            setPopupTitle("Complete Failed");
+            setPopupMessage(error.message);
+            setPopupType("error");
+            setLoading(false);
+        }
+    };
+    // Custom Alert Components
+    const showCustomAlert = (title, message, type = "success") => {
+        const emoji = type === "success" ? "🎉" : type === "error" ? "😢" : "ℹ️";
+        const bgColor = type === "success" ? C.success : type === "error" ? C.danger : C.primary;
+
+        Alert.alert(`${emoji} ${title}`, message, [{text: "Awesome!", style: "default"}], {cancelable: true});
+    };
+
+    const showCustomConfirm = (title, message, confirmText, onConfirm) => {
+        Alert.alert(
+            title,
+            message,
+            [
+                {text: "Not Yet", style: "cancel"},
+                {text: confirmText, onPress: onConfirm, style: "default"},
+            ],
+            {cancelable: true}
+        );
     };
 
     const getCurrentUserId = async () => {
@@ -478,11 +619,10 @@ function VisitDetailsScreen({route, navigation}) {
                 navigation.setParams({visit: {...visit}});
             } else {
                 const errorData = await response.json();
-                Alert.alert("Error", `Failed to update: ${errorData[0]?.message || "Unknown error"}`);
+                throw new Error(errorData[0]?.message || "Failed to update");
             }
         } catch (error) {
-            console.error("Update error:", error);
-            Alert.alert("Error", `Failed to update: ${error.message}`);
+            Alert.alert("Error", error.message);
         } finally {
             setUpdating(false);
         }
@@ -542,6 +682,7 @@ function VisitDetailsScreen({route, navigation}) {
                 </View>
 
                 {/* Schedule */}
+                {/* Schedule Section */}
                 <View style={styles.detailsCard}>
                     <View style={styles.detailsCardHeader}>
                         <Ionicons name="calendar-outline" size={20} color={C.primary} />
@@ -555,6 +696,51 @@ function VisitDetailsScreen({route, navigation}) {
                         <Text style={styles.detailsInfoLabel}>Planned End:</Text>
                         <Text style={styles.detailsInfoValue}>{formatDate(visit.plannedEndTime)}</Text>
                     </View>
+
+                    {/* ADD ACTUAL START TIME - SHOWS ONLY IF CHECKED IN */}
+                    {(visit.actualStartTime || isCheckedIn) && (
+                        <View
+                            style={[
+                                styles.detailsInfoRow,
+                                {
+                                    backgroundColor: C.successLight + "30",
+                                    marginTop: 4,
+                                    borderRadius: 8,
+                                    paddingHorizontal: 8,
+                                },
+                            ]}
+                        >
+                            <Text style={[styles.detailsInfoLabel, {color: C.success, fontWeight: "700"}]}>
+                                Actual Start:
+                            </Text>
+                            <Text style={[styles.detailsInfoValue, {color: C.success, fontWeight: "600"}]}>
+                                {visit.actualStartTime ? formatDate(visit.actualStartTime) : formatDate(new Date())}
+                            </Text>
+                        </View>
+                    )}
+
+                    {/* ADD ACTUAL END TIME - SHOWS ONLY IF CHECKED OUT */}
+                    {visit.actualEndTime && (
+                        <View
+                            style={[
+                                styles.detailsInfoRow,
+                                {
+                                    backgroundColor: C.primaryLight + "30",
+                                    marginTop: 4,
+                                    borderRadius: 8,
+                                    paddingHorizontal: 8,
+                                },
+                            ]}
+                        >
+                            <Text style={[styles.detailsInfoLabel, {color: C.primary, fontWeight: "700"}]}>
+                                Actual End:
+                            </Text>
+                            <Text style={[styles.detailsInfoValue, {color: C.primary, fontWeight: "600"}]}>
+                                {formatDate(visit.actualEndTime)}
+                            </Text>
+                        </View>
+                    )}
+
                     <View style={styles.detailsInfoRow}>
                         <Text style={styles.detailsInfoLabel}>Subject:</Text>
                         <Text style={styles.detailsInfoValue}>{displayValue(visit.subject)}</Text>
@@ -584,31 +770,52 @@ function VisitDetailsScreen({route, navigation}) {
                 {/* Action Buttons - Check In & Complete */}
                 <View style={styles.detailsActionsContainer}>
                     <TouchableOpacity
-                        style={[styles.detailsActionBtn, {backgroundColor: C.teal}]}
+                        style={[styles.detailsActionBtn, {backgroundColor: isCheckedIn ? C.warning : C.teal, flex: 1}]}
                         onPress={handleCheckIn}
-                        disabled={updating || visit.status === "Checked In" || visit.status === "Completed"}
+                        disabled={loading || visit.status === "Completed"}
+                        activeOpacity={0.8}
                     >
-                        <Ionicons name="checkbox-outline" size={22} color="#fff" />
-                        <Text style={styles.detailsActionBtnText}>
-                            {visit.status === "Checked In" ? "Checked In ✓" : "Check In"}
-                        </Text>
+                        <View style={styles.actionBtnContent}>
+                            {loading ? (
+                                <ActivityIndicator color="#fff" size="small" />
+                            ) : (
+                                <>
+                                    <Ionicons
+                                        name={isCheckedIn ? "log-out-outline" : "checkbox-outline"}
+                                        size={22}
+                                        color="#fff"
+                                    />
+                                    <Text style={styles.detailsActionBtnText}>
+                                        {loading ? "Processing..." : isCheckedIn ? "Check Out" : "Check In"}
+                                    </Text>
+                                </>
+                            )}
+                        </View>
                     </TouchableOpacity>
+
                     <TouchableOpacity
-                        style={[styles.detailsActionBtn, {backgroundColor: C.success}]}
+                        style={[styles.detailsActionBtn, {backgroundColor: C.success, flex: 1}]}
                         onPress={handleComplete}
                         disabled={updating || visit.status === "Completed"}
+                        activeOpacity={0.8}
                     >
-                        <Ionicons name="checkmark-circle-outline" size={22} color="#fff" />
-                        <Text style={styles.detailsActionBtnText}>
-                            {visit.status === "Completed" ? "Completed ✓" : "Complete Visit"}
-                        </Text>
+                        <View style={styles.actionBtnContent}>
+                            <Ionicons name="checkmark-circle-outline" size={24} color="#fff" />
+                            <Text style={styles.detailsActionBtnText}>
+                                {visit.status === "Completed" ? "Completed ✓" : "Complete"}
+                            </Text>
+                        </View>
                     </TouchableOpacity>
+
                     <TouchableOpacity
-                        style={[styles.detailsActionBtn, {backgroundColor: C.primary}]}
+                        style={[styles.detailsActionBtn, {backgroundColor: C.primary, flex: 1}]}
                         onPress={handleNavigate}
+                        activeOpacity={0.8}
                     >
-                        <Ionicons name="navigate-outline" size={22} color="#fff" />
-                        <Text style={styles.detailsActionBtnText}>Navigate</Text>
+                        <View style={styles.actionBtnContent}>
+                            <Ionicons name="navigate-outline" size={24} color="#fff" />
+                            <Text style={styles.detailsActionBtnText}>Navigate</Text>
+                        </View>
                     </TouchableOpacity>
                 </View>
 
@@ -733,6 +940,14 @@ function VisitDetailsScreen({route, navigation}) {
                     </View>
                 </Modal>
             </ScrollView>
+            <CustomPopup
+                visible={popupVisible}
+                title={popupTitle}
+                message={popupMessage}
+                type={popupType}
+                onClose={() => setPopupVisible(false)}
+                loading={popupType === "loading"}
+            />
         </SafeAreaView>
     );
 }
@@ -756,7 +971,7 @@ function Dashboard({roleKey, userInfo, sfToken, sfInstanceUrl, onLogout, navigat
         setRealData((prev) => ({...prev, loading: true, error: null}));
         try {
             const visitQuery = encodeURIComponent(
-                "SELECT Id, Name, cgcloud__Subject__c, Status, PlannedVisitStartTime, PlannedVisitEndTime, ActualVisitStartTime, ActualVisitEndTime, Account.Name, AccountId, cgcloud__Account_City__c, cgcloud__Account_Street__c, Place.Name, VisitType.Name, cgcloud__Note__c, cgcloud__Responsible__c, cgcloud__Accountable__c, cgcloud__Creation_Mode__c, cgcloud__Creation_Date_and_Time__c, cgcloud__Tour__c, cgcloud__Week__c, cgcloud__Duration_Effective__c, cgcloud__IsAllDayEvent__c, cgcloud__Fixed_Visit_Date__c, cgcloud__Location_Status__c, cgcloud__Distribution_Rate_All__c, cgcloud__Distribution_Rate_Focus__c, cgcloud__OOS_Rate_All__c, cgcloud__OOS_Rate_Focus__c, cgcloud__PSI__c, cgcloud__PSQ_Rate__c, cgcloud__Distribution_Issues__c, cgcloud__OOS_Issues__c, cgcloud__Distribution_Issue__c, cgcloud__OOS_Issue__c, cgcloud__Start_Geolocation__c, cgcloud__Geolocation__c, cgcloud__Is_Vst_Cmpl_Osid_Range__c, cgcloud__Is_Vst_Start_Osid_Range__c, CreatedBy.Name, CreatedDate, LastModifiedBy.Name, LastModifiedDate, Owner.Name, RecordType.Name FROM Visit ORDER BY CreatedDate DESC LIMIT 100"
+                "SELECT Id, Name, cgcloud__Subject__c, Status, PlannedVisitStartTime, PlannedVisitEndTime, ActualVisitStartTime, ActualVisitEndTime, ActualStartTime__c, Actual_End_Time__c, Account.Name, AccountId, cgcloud__Account_City__c, cgcloud__Account_Street__c, Place.Name, VisitType.Name, cgcloud__Note__c, cgcloud__Responsible__c, cgcloud__Accountable__c, cgcloud__Creation_Mode__c, cgcloud__Creation_Date_and_Time__c, cgcloud__Tour__c, cgcloud__Week__c, cgcloud__Duration_Effective__c, cgcloud__IsAllDayEvent__c, cgcloud__Fixed_Visit_Date__c, cgcloud__Location_Status__c, cgcloud__Distribution_Rate_All__c, cgcloud__Distribution_Rate_Focus__c, cgcloud__OOS_Rate_All__c, cgcloud__OOS_Rate_Focus__c, cgcloud__PSI__c, cgcloud__PSQ_Rate__c, cgcloud__Distribution_Issues__c, cgcloud__OOS_Issues__c, cgcloud__Distribution_Issue__c, cgcloud__OOS_Issue__c, cgcloud__Start_Geolocation__c, cgcloud__Geolocation__c, cgcloud__Is_Vst_Cmpl_Osid_Range__c, cgcloud__Is_Vst_Start_Osid_Range__c, CreatedBy.Name, CreatedDate, LastModifiedBy.Name, LastModifiedDate, Owner.Name, RecordType.Name FROM Visit ORDER BY PlannedVisitStartTime ASC LIMIT 100"
             );
             const visitResponse = await fetch(`${sfInstanceUrl}/services/data/v58.0/query?q=${visitQuery}`, {
                 headers: {
@@ -791,6 +1006,42 @@ function Dashboard({roleKey, userInfo, sfToken, sfInstanceUrl, onLogout, navigat
         }
     };
 
+    const showFilteredVisits = (filterType) => {
+        let filteredVisits = [];
+        let title = "";
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        if (filterType === "Today") {
+            filteredVisits = realData.visits.filter((visit) => {
+                // EXCLUDE COMPLETED VISITS FROM TODAY'S LIST
+                if (visit.Status?.toLowerCase() === "completed") return false;
+
+                if (!visit.PlannedVisitStartTime) return false;
+                const visitDate = new Date(visit.PlannedVisitStartTime);
+                const visitDateOnly = new Date(visitDate.getFullYear(), visitDate.getMonth(), visitDate.getDate());
+                const todayDateOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+                return visitDateOnly.getTime() === todayDateOnly.getTime();
+            });
+            title = "📅 Today's Visits";
+        } else if (filterType === "Planned") {
+            filteredVisits = realData.visits.filter((visit) => visit.Status?.toLowerCase() === "planned");
+            title = "📋 Planned Visits";
+        } else if (filterType === "Completed") {
+            filteredVisits = realData.visits.filter((visit) => visit.Status?.toLowerCase() === "completed");
+            title = "✅ Completed Visits";
+        }
+
+        navigation.navigate("VisitsList", {
+            visits: filteredVisits,
+            title: title,
+            filterType: filterType,
+            sfToken: sfToken,
+            sfInstanceUrl: sfInstanceUrl,
+        });
+    };
+
     const getScheduleFromRealData = () => {
         const scheduleItems = [];
         const today = new Date();
@@ -801,12 +1052,17 @@ function Dashboard({roleKey, userInfo, sfToken, sfInstanceUrl, onLogout, navigat
 
         if (realData.visits && Array.isArray(realData.visits)) {
             realData.visits.forEach((visit) => {
+                // SKIP COMPLETED VISITS - DON'T SHOW IN TODAY'S SCHEDULE
+                if (visit.Status?.toLowerCase() === "completed") {
+                    return; // Skip this visit completely
+                }
+
                 let shouldShow = false;
                 let displayLabel = "";
+                let sortPriority = 2; // 0 = Today, 1 = Tomorrow, 2 = Other
 
                 if (visit.PlannedVisitStartTime) {
                     const visitDate = new Date(visit.PlannedVisitStartTime);
-                    // Compare date only (ignoring time and timezone)
                     const visitDateOnly = new Date(visitDate.getFullYear(), visitDate.getMonth(), visitDate.getDate());
                     const todayDateOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
                     const tomorrowDateOnly = new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate());
@@ -814,16 +1070,12 @@ function Dashboard({roleKey, userInfo, sfToken, sfInstanceUrl, onLogout, navigat
                     if (visitDateOnly.getTime() === todayDateOnly.getTime()) {
                         shouldShow = true;
                         displayLabel = "Today";
+                        sortPriority = 0;
                     } else if (visitDateOnly.getTime() === tomorrowDateOnly.getTime()) {
                         shouldShow = true;
                         displayLabel = "Tomorrow";
+                        sortPriority = 1;
                     }
-
-                    console.log(
-                        `Visit: ${visit.Account?.Name}, UTC: ${
-                            visit.PlannedVisitStartTime
-                        }, DateOnly: ${visitDateOnly.toDateString()}, Label: ${displayLabel || "No"}`
-                    );
                 }
 
                 if (shouldShow) {
@@ -849,6 +1101,8 @@ function Dashboard({roleKey, userInfo, sfToken, sfInstanceUrl, onLogout, navigat
                         plannedEndTime: visit.PlannedVisitEndTime,
                         actualStartTime: visit.ActualVisitStartTime,
                         actualEndTime: visit.ActualVisitEndTime,
+                        actualStartTimeCustom: visit.ActualStartTime__c,
+                        actualEndTimeCustom: visit.Actual_End_Time__c,
                         name: visit.Name,
                         visitTemplate: visit.VisitType?.Name,
                         responsible: visit.cgcloud__Responsible__c,
@@ -882,14 +1136,23 @@ function Dashboard({roleKey, userInfo, sfToken, sfInstanceUrl, onLogout, navigat
                         ownerName: visit.Owner?.Name,
                         recordType: visit.RecordType?.Name,
                         displayLabel: displayLabel,
+                        sortPriority: sortPriority,
                     });
                 }
             });
         }
 
-        console.log(`Total visits for today/tomorrow: ${scheduleItems.length}`);
-        return scheduleItems.sort((a, b) => a.time.localeCompare(b.time)).slice(0, 10);
+        // Sort by priority (Today first, then Tomorrow), then by time
+        return scheduleItems
+        .sort((a, b) => {
+            if (a.sortPriority !== b.sortPriority) {
+                return a.sortPriority - b.sortPriority;
+            }
+            return a.time.localeCompare(b.time);
+        })
+        .slice(0, 10);
     };
+
     const getStatusColor = (status) => {
         switch (status?.toLowerCase()) {
             case "completed":
@@ -919,15 +1182,23 @@ function Dashboard({roleKey, userInfo, sfToken, sfInstanceUrl, onLogout, navigat
                 return C.primaryLight;
         }
     };
+
     const getRealStats = () => {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
         const todayVisits = realData.visits.filter((visit) => {
+            // EXCLUDE COMPLETED VISITS
+            if (visit.Status?.toLowerCase() === "completed") return false;
             if (!visit.PlannedVisitStartTime) return false;
             const visitDate = new Date(visit.PlannedVisitStartTime);
-            const today = new Date();
-            return visitDate.toDateString() === today.toDateString();
+            const visitDateOnly = new Date(visitDate.getFullYear(), visitDate.getMonth(), visitDate.getDate());
+            const todayDateOnly = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+            return visitDateOnly.getTime() === todayDateOnly.getTime();
         }).length;
 
         const plannedVisits = realData.visits.filter((visit) => visit.Status?.toLowerCase() === "planned").length;
+
         const completedVisits = realData.visits.filter((visit) => visit.Status?.toLowerCase() === "completed").length;
 
         return [
@@ -1043,10 +1314,24 @@ function Dashboard({roleKey, userInfo, sfToken, sfInstanceUrl, onLogout, navigat
                     </View>
                 </View>
 
+                {/* Clickable Stats */}
                 <View style={styles.statsRow}>
                     {displayStats &&
                         displayStats.map((s, i) => (
-                            <View key={i} style={styles.statCard}>
+                            <TouchableOpacity
+                                key={i}
+                                style={styles.statCard}
+                                activeOpacity={0.7}
+                                onPress={() => {
+                                    if (s.label === "Visits Today") {
+                                        showFilteredVisits("Today");
+                                    } else if (s.label === "Planned Visits") {
+                                        showFilteredVisits("Planned");
+                                    } else if (s.label === "Completed") {
+                                        showFilteredVisits("Completed");
+                                    }
+                                }}
+                            >
                                 <View style={[styles.statIconBox, {backgroundColor: s.color + "18"}]}>
                                     <Ionicons name={s.icon} size={18} color={s.color} />
                                 </View>
@@ -1054,7 +1339,13 @@ function Dashboard({roleKey, userInfo, sfToken, sfInstanceUrl, onLogout, navigat
                                     {realData.loading ? "..." : s.value}
                                 </Text>
                                 <Text style={styles.statLabel}>{s.label}</Text>
-                            </View>
+                                <Ionicons
+                                    name="chevron-forward-outline"
+                                    size={12}
+                                    color={C.textMuted}
+                                    style={{marginTop: 4}}
+                                />
+                            </TouchableOpacity>
                         ))}
                 </View>
 
@@ -1119,18 +1410,29 @@ function Dashboard({roleKey, userInfo, sfToken, sfInstanceUrl, onLogout, navigat
                                 {item.displayLabel && (
                                     <View
                                         style={[
-                                            styles.scheduleTypePill,
+                                            styles.scheduleBadge,
                                             {
                                                 backgroundColor:
                                                     item.displayLabel === "Today" ? C.successLight : C.warningLight,
+                                                paddingHorizontal: 10,
+                                                paddingVertical: 4,
+                                                borderRadius: 16,
+                                                alignSelf: "flex-start",
                                                 marginTop: 4,
+                                                marginBottom: 6,
                                             },
                                         ]}
                                     >
                                         <Text
                                             style={[
-                                                styles.scheduleTypeText,
-                                                {color: item.displayLabel === "Today" ? C.success : C.warning},
+                                                styles.scheduleBadgeText,
+                                                {
+                                                    color: item.displayLabel === "Today" ? C.success : C.warning,
+                                                    fontSize: 11,
+                                                    fontWeight: "700",
+                                                    textTransform: "uppercase",
+                                                    letterSpacing: 0.5,
+                                                },
                                             ]}
                                         >
                                             {item.displayLabel}
@@ -1165,7 +1467,21 @@ function Dashboard({roleKey, userInfo, sfToken, sfInstanceUrl, onLogout, navigat
                 <Text style={[styles.sectionTitle, {marginTop: 8, marginBottom: 12}]}>Quick Actions</Text>
                 <View style={styles.actionsGrid}>
                     {role.actions.map((a, i) => (
-                        <TouchableOpacity key={i} style={styles.actionCard} activeOpacity={0.8}>
+                        <TouchableOpacity
+                            key={i}
+                            style={styles.actionCard}
+                            activeOpacity={0.8}
+                            onPress={() => {
+                                if (a.label === "My Leads") {
+                                    navigation.navigate("LeadsList", {
+                                        sfToken: sfToken,
+                                        sfInstanceUrl: sfInstanceUrl,
+                                    });
+                                } else if (a.label === "My Deals") {
+                                    Alert.alert("Coming Soon", "New Deal feature coming soon!");
+                                }
+                            }}
+                        >
                             <View style={[styles.actionIconBox, {backgroundColor: role.light}]}>
                                 <Ionicons name={a.icon} size={22} color={role.color} />
                             </View>
@@ -1182,7 +1498,16 @@ function Dashboard({roleKey, userInfo, sfToken, sfInstanceUrl, onLogout, navigat
                         <TouchableOpacity
                             key={tab.key}
                             style={styles.tabItem}
-                            onPress={() => setActiveTab(tab.key)}
+                            onPress={() => {
+                                if (tab.key === "customers") {
+                                    navigation.navigate("AccountsList", {
+                                        sfToken: sfToken,
+                                        sfInstanceUrl: sfInstanceUrl,
+                                    });
+                                } else {
+                                    setActiveTab(tab.key);
+                                }
+                            }}
                             activeOpacity={0.7}
                         >
                             <Ionicons name={tab.icon} size={22} color={active ? role.color : C.textMuted} />
@@ -1280,6 +1605,13 @@ function AppNavigator() {
                     )}
                 </Stack.Screen>
                 <Stack.Screen name="VisitDetails" component={VisitDetailsScreen} />
+                <Stack.Screen name="VisitsList" component={VisitsListScreen} />
+                <Stack.Screen name="LogVisit" component={LogVisitScreen} />
+                <Stack.Screen name="NewLead" component={NewLeadScreen} />
+                <Stack.Screen name="LeadsList" component={LeadsListScreen} />
+                <Stack.Screen name="LeadDetails" component={LeadDetailsScreen} />
+                <Stack.Screen name="AccountsList" component={AccountsListScreen} />
+                <Stack.Screen name="AccountDetails" component={AccountDetailsScreen} />
             </Stack.Navigator>
         );
     }
@@ -1730,6 +2062,97 @@ const styles = StyleSheet.create({
     modalSaveText: {
         color: "#fff",
         fontWeight: "600",
+    },
+    scheduleBadge: {
+        paddingHorizontal: 10,
+        paddingVertical: 4,
+        borderRadius: 16,
+        alignSelf: "flex-start",
+        marginTop: 4,
+        marginBottom: 6,
+    },
+    scheduleBadgeText: {
+        fontSize: 11,
+        fontWeight: "700",
+        textTransform: "uppercase",
+        letterSpacing: 0.5,
+    },
+
+    detailsActionsContainer: {
+        flexDirection: "row",
+        marginHorizontal: 16,
+        marginTop: 16,
+        gap: 12,
+        marginBottom: 20,
+    },
+    detailsActionBtn: {
+        borderRadius: 14,
+        overflow: "hidden",
+        elevation: 3,
+        shadowColor: "#000",
+        shadowOffset: {width: 0, height: 2},
+        shadowOpacity: 0.1,
+        shadowRadius: 4,
+    },
+    actionBtnContent: {
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 10,
+        paddingVertical: 14,
+        paddingHorizontal: 12,
+    },
+    detailsActionBtnText: {
+        color: "#fff",
+        fontSize: 14,
+        fontWeight: "700",
+        letterSpacing: 0.5,
+    },
+
+    statCard: {
+        flex: 1,
+        backgroundColor: C.surface,
+        borderRadius: 16,
+        padding: 14,
+        alignItems: "center",
+        borderWidth: 1,
+        borderColor: C.border,
+        shadowColor: "#000",
+        shadowOffset: {width: 0, height: 1},
+        shadowOpacity: 0.04,
+        shadowRadius: 6,
+        elevation: 2,
+    },
+
+    detailsActionsContainer: {
+        flexDirection: "row",
+        marginHorizontal: 16,
+        marginTop: 12,
+        gap: 10,
+        marginBottom: 16,
+    },
+    detailsActionBtn: {
+        borderRadius: 12,
+        overflow: "hidden",
+        elevation: 2,
+        shadowColor: "#000",
+        shadowOffset: {width: 0, height: 1},
+        shadowOpacity: 0.08,
+        shadowRadius: 2,
+    },
+    actionBtnContent: {
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 8,
+        paddingVertical: 10,
+        paddingHorizontal: 8,
+    },
+    detailsActionBtnText: {
+        color: "#fff",
+        fontSize: 13,
+        fontWeight: "600",
+        letterSpacing: 0.3,
     },
     detailsInfoLabel: {fontSize: 13, color: C.textMuted, fontWeight: "500"},
     detailsInfoValue: {fontSize: 13, color: C.textPrimary, fontWeight: "400", flex: 1, textAlign: "right"},
