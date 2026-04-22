@@ -7,6 +7,8 @@ import LeadDetailsScreen from "./LeadDetailsScreen";
 import AccountsListScreen from "./AccountsListScreen";
 import AccountDetailsScreen from "./AccountDetailsScreen";
 import {useFocusEffect} from "@react-navigation/native";
+import InventoryScreen from "./InventoryScreen";
+import CaptureOrderScreen from './CaptureOrderScreen';
 
 import {
     StyleSheet,
@@ -51,7 +53,7 @@ if (TextInput.defaultProps) {
 
 const SF_CLIENT_ID = "YOUR_SALESFORCE_CONSUMER_KEY";
 const SF_CLIENT_SECRET = "YOUR_SALESFORCE_CONSUMER_SECRET";
-const SF_BASE_URL = "YOUR_SALESFORCE_INSTANCE_URL"; 
+const SF_BASE_URL = "YOUR_SALESFORCE_INSTANCE_URL";
 
 const Stack = createNativeStackNavigator();
 
@@ -123,6 +125,8 @@ const ROLES = {
             // {icon: "create-outline", label: "Log Visit"},
             {icon: "person-add-outline", label: "My Leads"},
             {icon: "trending-up-outline", label: "My Deals"},
+            {icon: "cube-outline", label: "Inventory"},
+            {icon: "cart-outline", label: "Capture Order"},
             // {icon: "flag-outline", label: "Flag Opp"},
         ],
     },
@@ -1479,6 +1483,16 @@ function Dashboard({roleKey, userInfo, sfToken, sfInstanceUrl, onLogout, navigat
                                     });
                                 } else if (a.label === "My Deals") {
                                     Alert.alert("Coming Soon", "New Deal feature coming soon!");
+                                } else if (a.label === "Inventory") {
+                                    navigation.navigate("Inventory", {
+                                        sfToken: sfToken,
+                                        sfInstanceUrl: sfInstanceUrl,
+                                    });
+                                } else if (a.label === "Capture Order") {
+                                    navigation.navigate("CaptureOrder", {
+                                        sfToken: sfToken,
+                                        sfInstanceUrl: sfInstanceUrl,
+                                    });
                                 }
                             }}
                         >
@@ -1612,6 +1626,8 @@ function AppNavigator() {
                 <Stack.Screen name="LeadDetails" component={LeadDetailsScreen} />
                 <Stack.Screen name="AccountsList" component={AccountsListScreen} />
                 <Stack.Screen name="AccountDetails" component={AccountDetailsScreen} />
+                <Stack.Screen name="Inventory" component={InventoryScreen} />
+                <Stack.Screen name="CaptureOrder" component={CaptureOrderScreen} />
             </Stack.Navigator>
         );
     }
